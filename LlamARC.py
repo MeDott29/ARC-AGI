@@ -14,7 +14,7 @@ def get_arc_puzzle_json(user_message):
     iterator = client.inference.chat_completion(
         model=model,
         messages=[
-            {"role": "system", "content": "You only respond with valid ARC puzzle JSON."},
+            {"role": "system", "content": "You only respond with a valid JSON string representing an ARC puzzle.  Do not include any other output."},
             {"role": "user", "content": user_message}
         ],
         stream=True
@@ -28,9 +28,19 @@ def get_arc_puzzle_json(user_message):
     
     return json_response
 
-# Example usage - you can modify the user input incrementally
-user_input = "Create a simple 3x3 ARC puzzle with symmetry."
-arc_json = get_arc_puzzle_json(user_input)
+import json
 
-print("\n\nGenerated ARC Puzzle JSON:")
-print(arc_json)
+# Example usage - you can modify the user input incrementally
+user_input = "Create a simple 3x3 ARC puzzle with symmetry. Return only valid JSON."
+arc_json_string = get_arc_puzzle_json(user_input)
+
+print("\n\nGenerated ARC Puzzle JSON String:")
+print(arc_json_string)
+
+try:
+    arc_json = json.loads(arc_json_string)
+    print("\n\nParsed ARC Puzzle JSON:")
+    print(arc_json)
+except json.JSONDecodeError as e:
+    print(f"\n\nError decoding JSON: {e}")
+    print(f"Raw response: {arc_json_string}")
