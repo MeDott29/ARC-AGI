@@ -39,35 +39,68 @@ def load_datasets(data_dir: str = 'arc'):
     
     return data
 
-def prepare_arc_dataset(challenges: Dict, solutions: Dict = None, is_training: bool = True) -> Dataset:
-    """Convert ARC data to HF Dataset format"""
+def grid_to_string(grid):
+    """Convert grid to string representation"""
+    return ' '.join([str(x) for row in grid for x in row])
+
+def prepare_arc_dataset(challenges: Dict, solutions: Dict = None, tokenizer = None, is_training: bool = True) -> Dataset:
+    """Convert ARC data to HF Dataset format with proper tokenization"""
     dataset_items = []
     
     for task_id, task in challenges.items():
         if is_training:
             # Add training pairs
             for train_pair in task['train']:
+                input_text = f"Input grid: {grid_to_string(train_pair['input'])} Output grid:"
+                output_text = f" {grid_to_string(train_pair['output'])}"
+                
+                # Tokenize input and output
+                tokenized_input = tokenizer(input_text, truncation=False)
+                tokenized_output = tokenizer(output_text, truncation=False)
+                
+                # Combine tokens and create labels
+                input_ids = tokenized_input['input_ids']
+                labels = [-100] * len(input_ids) + tokenized_output['input_ids']
+                attention_mask = [1] * (len(input_ids) + len(tokenized_output['input_ids']))
+                input_ids.extend(tokenized_output['input_ids'])
+                
                 dataset_items.append({
-                    'input_grid': train_pair['input'],
-                    'output_grid': train_pair['output'],
+                    'input_ids': input_ids,
+                    'attention_mask': attention_mask,
+                    'labels': labels,
                     'task_id': task_id
                 })
             
             # Add test pairs with solutions
             if solutions:
                 for i, test_pair in enumerate(task['test']):
+                    input_text = f"Input grid: {grid_to_string(test_pair['input'])} Output grid:"
+                    output_text = f" {grid_to_string(solutions[task_id][i])}"
+                    
+                    tokenized_input = tokenizer(input_text, truncation=False)
+                    tokenized_output = tokenizer(output_text, truncation=False)
+                    
+                    input_ids = tokenized_input['input_ids']
+                    labels = [-100] * len(input_ids) + tokenized_output['input_ids']
+                    attention_mask = [1] * (len(input_ids) + len(tokenized_output['input_ids']))
+                    input_ids.extend(tokenized_output['input_ids'])
+                    
                     dataset_items.append({
-                        'input_grid': test_pair['input'],
-                        'output_grid': solutions[task_id][i],
+                        'input_ids': input_ids,
+                        'attention_mask': attention_mask,
+                        'labels': labels,
                         'task_id': task_id
                     })
         else:
             # For test set, only include inputs
             for i, test_pair in enumerate(task['test']):
+                input_text = f"Input grid: {grid_to_string(test_pair['input'])} Output grid:"
+                tokenized_input = tokenizer(input_text, truncation=False)
+                
                 dataset_items.append({
-                    'input_grid': test_pair['input'],
-                    'task_id': task_id,
-                    'output_grid': solutions[task_id][i] if solutions else None
+                    'input_ids': tokenized_input['input_ids'],
+                    'attention_mask': tokenized_input['attention_mask'],
+                    'task_id': task_id
                 })
     
     return Dataset.from_list(dataset_items)
@@ -78,37 +111,25 @@ def compute_grid_accuracy(pred_grid: np.ndarray, true_grid: np.ndarray) -> float
 
 def collate_arc_data(examples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     """Prepare batch data for model"""
-    input_grids = [torch.tensor([0] + [x for row in grid for x in row] + [1]) 
-                  for grid in examples["input_grid"]]
+    # Find max length in the batch
+    max_length = max(len(x['input_ids']) for x in examples)
     
-    # Handle output grids if present
-    if examples["output_grid"][0] is not None:
-        output_grids = [torch.tensor([0] + [x for row in grid for x in row] + [1]) 
-                       for grid in examples["output_grid"]]
-        
-        # Pad sequences
-        max_len = max(max(len(x) for x in input_grids), 
-                     max(len(x) for x in output_grids))
-        
-        input_grids = [torch.nn.functional.pad(x, (0, max_len - len(x)), value=1) 
-                      for x in input_grids]
-        output_grids = [torch.nn.functional.pad(x, (0, max_len - len(x)), value=-100) 
-                       for x in output_grids]
-        
+    # Pad all sequences to max length
+    input_ids = [x['input_ids'] + [1] * (max_length - len(x['input_ids'])) for x in examples]
+    attention_mask = [x['attention_mask'] + [0] * (max_length - len(x['attention_mask'])) for x in examples]
+    
+    # Handle labels if present
+    if 'labels' in examples[0]:
+        labels = [x['labels'] + [-100] * (max_length - len(x['labels'])) for x in examples]
         return {
-            "input_ids": torch.stack(input_grids),
-            "labels": torch.stack(output_grids),
-            "attention_mask": torch.ones_like(torch.stack(input_grids))
+            'input_ids': torch.tensor(input_ids),
+            'attention_mask': torch.tensor(attention_mask),
+            'labels': torch.tensor(labels)
         }
     
-    # For inference only
-    max_len = max(len(x) for x in input_grids)
-    input_grids = [torch.nn.functional.pad(x, (0, max_len - len(x)), value=1) 
-                   for x in input_grids]
-    
     return {
-        "input_ids": torch.stack(input_grids),
-        "attention_mask": torch.ones_like(torch.stack(input_grids))
+        'input_ids': torch.tensor(input_ids),
+        'attention_mask': torch.tensor(attention_mask)
     }
 
 class ArcTrainer(Trainer):
@@ -220,17 +241,23 @@ def main():
     # Initialize wandb
     wandb.init(project="arcopt")
     
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("facebook/galactica-125m")
+    tokenizer.pad_token = tokenizer.eos_token
+    
     # Load datasets
     data = load_datasets()
     
     # Prepare datasets
     train_dataset = prepare_arc_dataset(
         data['training_challenges'], 
-        data['training_solutions']
+        data['training_solutions'],
+        tokenizer=tokenizer
     )
     eval_dataset = prepare_arc_dataset(
         data['evaluation_challenges'], 
-        data['evaluation_solutions']
+        data['evaluation_solutions'],
+        tokenizer=tokenizer
     )
     
     # Initialize model
@@ -258,6 +285,7 @@ def main():
         fp16=True,
         report_to="wandb",
         optim="adamw_bnb_8bit",
+        remove_unused_columns=False  # Important: keep all columns
     )
     
     # Initialize trainer
@@ -267,6 +295,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collate_arc_data,
+        tokenizer=tokenizer
     )
     
     # Train model
